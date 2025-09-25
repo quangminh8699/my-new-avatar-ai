@@ -1,0 +1,24 @@
+@startuml My New Avatar AI
+participant client 
+participant FastAPI_API as fastApi
+participant Celery_Worker as celery
+participant Agno_Agent as agno
+participant AI_Model as aiModel
+participant S3_AWS as s3
+participant Database
+
+client -> fastApi: postImage()
+fastApi -> celery: enqueueTask()
+celery -> agno: generateImage()
+agno -> aiModel: postPromptAndImage()
+aiModel --> agno: responseImageBytes
+agno --> celery: imageBytes
+celery -> s3: uploadImageBytes()
+s3 --> celery: image url
+celery -> database: saveImageUrl()
+
+client -> fastApi: getImageUrlAndStatus()
+fastApi -> database: getImageUrlAndStatusFromDatabase()
+database --> fastApi: response
+fastApi --> client: response
+@enduml

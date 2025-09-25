@@ -1,8 +1,12 @@
 fastapi
 uvicorn[standard]
 python-multipart
-httpx
+httpx[http2]
 boto3
-celery
+celery[redis]
 redis
+sqlmodel
+asyncpg
 python-dotenv
+agno
+python-multipart
