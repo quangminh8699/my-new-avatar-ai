@@ -1,24 +1,32 @@
 @startuml My New Avatar AI
-participant client 
-participant FastAPI_API as fastApi
-participant Celery_Worker as celery
-participant Agno_Agent as agno
-participant AI_Model as aiModel
-participant S3_AWS as s3
+participant Client 
+participant FastAPI_API as FastAPI
+participant Celery_Worker as Celery
+participant Agno_Agent as Agno
+participant AI_Model as AIModel
+participant S3_AWS as S3
 participant Database
 
-client -> fastApi: postImage()
-fastApi -> celery: enqueueTask()
-celery -> agno: generateImage()
-agno -> aiModel: postPromptAndImage()
-aiModel --> agno: responseImageBytes
-agno --> celery: imageBytes
-celery -> s3: uploadImageBytes()
-s3 --> celery: image url
-celery -> database: saveImageUrl()
+== Submit job ==
+Client -> FastAPI: POST /jobs (image, theme, outfit)
+FastAPI -> Celery: enqueueTask(job_id, temp_path, theme, outfit)
+FastAPI --> Client: JSON {job_id, status="queued"}
 
-client -> fastApi: getImageUrlAndStatus()
-fastApi -> database: getImageUrlAndStatusFromDatabase()
-database --> fastApi: response
-fastApi --> client: response
+== Open WebSocket ==
+Client -> FastAPI: OPEN WS /ws/jobs/{job_id}
+FastAPI --> Client: "connected"
+
+== Background processing ==
+Celery -> Agno: generateImage(job_id, temp_path, theme, outfit)
+Agno -> AIModel: postPromptAndImage()
+AIModel --> Agno: imageBytes
+Agno --> Celery: imageBytes
+Celery -> S3: uploadImageBytes()
+S3 --> Celery: image url
+Celery -> Database: save(job_id, status=done, url)
+Celery -> FastAPI: publish "job done" event (Redis/pubsub)
+
+== Push update realtime ==
+FastAPI --> Client: WS message {job_id, status="done", url}
+
 @enduml
