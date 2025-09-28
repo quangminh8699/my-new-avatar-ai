@@ -2,13 +2,16 @@ import os
 from typing import Any, Dict
 import httpx
 from agno.agent import Agent
-from agno.models.openai import OpenAIChat  # if you want to use OpenAI for text reasoning
-from agno.tools import Tool  # lightweight callable tool
-from agno.team import Team
+from agno.models.openai import OpenAIChat 
+from agno.tools import Tool 
 from agno import AgentResult
 
-# We create a custom tool to call image generation provider.
-# This tool is a thin wrapper — adapt provider-specific details (endpoints, headers).
+'''
+Giải thích ngắn: ImageGenTool là tool Agno thực hiện HTTP request đến provider (Replicate / Stability / OpenAI). 
+generate_avatar_bytes chạy agent, agent sẽ gọi tool và trả bytes. 
+Bạn phải kiểm tra và điều chỉnh chi tiết provider (cách gọi Replicate/ Stability/ OpenAI thực tế) theo docs provider.
+'''
+
 class ImageGenTool(Tool):
     def __init__(self, provider: str):
         super().__init__(name="image_gen", description="Generate image from prompt and reference image")

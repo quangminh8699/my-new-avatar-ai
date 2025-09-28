@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+aiomysql
+celery[redis]
+python-multipart
+boto3
+redis
+agno

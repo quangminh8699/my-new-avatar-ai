@@ -4,7 +4,9 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import sessionmaker
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+# Đọc URL từ .env hoặc đặt trực tiếp
+# Ví dụ: mysql+pymysql://user:password@localhost:3306/avatar_db
+DATABASE_URL = "mysql+pymysql://root:password@localhost:3306/my_new_avatart_ai"
 
 # async engine
 engine = create_async_engine(DATABASE_URL, echo=False, future=True)
