@@ -1,6 +1,6 @@
 # My New Avatar AI
 
-A SaaS application that generates AI-powered avatar images from user portrait photos. Users upload a photo, select a **theme** (style/aesthetic) and an **outfit** (clothing style), and the system produces a new personalized avatar while preserving the user's identity.
+A SaaS application that generates AI-powered avatar images from user portrait photos. Users upload a photo, select a **theme** (style/aesthetic) and an **outfit** (clothing style), and the system produces a personalized avatar while preserving the user's identity.
 
 ---
 
@@ -12,18 +12,22 @@ A SaaS application that generates AI-powered avatar images from user portrait ph
 - [Project Structure](#project-structure)
 - [How It Works](#how-it-works)
 - [API Reference](#api-reference)
-- [Data Model](#data-model)
 - [Configuration](#configuration)
 - [Running the Project](#running-the-project)
+- [AWS EC2 Deployment](#aws-ec2-deployment)
 
 ---
 
 ## What It Does
 
-1. A user submits a portrait photo along with a chosen theme and outfit via a REST API.
-2. The system returns a `job_id` immediately and queues the generation task in the background.
-3. The user opens a WebSocket connection to receive real-time status updates.
-4. A Celery worker picks up the job, uses an AI agent to generate the avatar image, uploads the result to AWS S3, and pushes the final URL to the client through Redis pub/sub and WebSocket — no polling required.
+1. A user uploads a portrait photo and selects a theme + outfit via the web UI.
+2. The system returns a `job_id` immediately and queues the generation task.
+3. The user's browser opens a WebSocket connection for real-time status updates.
+4. A Celery worker picks up the job:
+   - **Claude AI** (claude-sonnet-4-6) analyzes the portrait using vision and crafts a detailed, identity-preserving generation prompt.
+   - The prompt is sent to an image generation API (Stability AI or Replicate).
+   - The result is uploaded to **AWS S3**.
+   - The S3 URL is pushed to the client via Redis pub/sub → WebSocket.
 
 ---
 
@@ -31,62 +35,54 @@ A SaaS application that generates AI-powered avatar images from user portrait ph
 
 | Layer | Technology | Role |
 |---|---|---|
+| Frontend | **Next.js 14** + **Tailwind CSS** | Web UI: upload, status, result display |
 | API Server | **FastAPI** + **Uvicorn** | REST endpoints and WebSocket server |
 | Background Jobs | **Celery** | Async task queue for image generation |
 | Messaging / Broker | **Redis** | Celery broker and pub/sub for real-time updates |
 | Database | **MySQL 8.0** + **SQLModel** + **aiomysql** | Job metadata persistence (async ORM) |
-| AI Orchestration | **Agno** | Agent framework: prompt engineering, tool calls, memory |
-| Image Generation | **OpenAI API** / **Replicate API** / **Stability AI API** | Actual image synthesis (provider is configurable) |
+| AI Orchestration | **Claude AI** (claude-sonnet-4-6) | Vision analysis + prompt engineering via Anthropic API |
+| Image Generation | **Stability AI** / **Replicate** | Actual image synthesis (provider is configurable) |
 | Cloud Storage | **AWS S3** + **boto3** | Stores generated avatar images |
 | HTTP Client | **httpx** | Async calls to external AI provider APIs |
-| File Uploads | **python-multipart** | Parses multipart form data for image uploads |
 | Containerization | **Docker** + **Docker Compose** | Runs all services together |
+| Deployment | **AWS EC2** | Hosts all containers in production |
 
 ---
 
 ## Architecture
 
-The system is split into four independent services orchestrated by Docker Compose:
-
 ```
-┌──────────────────────────────────────────────────────┐
-│                     Client                           │
-│         (HTTP REST + WebSocket)                      │
-└───────────────────┬──────────────────────────────────┘
-                    │
-                    ▼
-┌──────────────────────────────────────────────────────┐
-│               FastAPI API Server                     │
-│   POST /jobs · GET /jobs/{id} · WS /ws/jobs/{id}     │
-└──────┬───────────────────────────────────┬───────────┘
-       │ enqueue task                      │ subscribe to updates
-       ▼                                   ▼
-┌─────────────┐                   ┌─────────────────┐
-│   Celery    │                   │      Redis      │
-│   Worker    │──publish status──▶│   pub/sub       │
-└──────┬──────┘                   └────────┬────────┘
-       │                                   │ push to WS client
-       ▼                                   ▼
-┌─────────────┐                   ┌─────────────────┐
-│  Agno Agent │                   │  FastAPI WS     │
-│ (ImageGen)  │                   │  Handler        │
-└──────┬──────┘                   └─────────────────┘
-       │
-       ├──▶ OpenAI / Replicate / Stability AI
-       │
+┌──────────────────────────────────────────────────────────┐
+│               Next.js Frontend (port 3000)               │
+│   Upload form · Theme picker · WebSocket · Result view   │
+└───────────────────────────┬──────────────────────────────┘
+                            │ HTTP REST + WebSocket
+                            ▼
+┌──────────────────────────────────────────────────────────┐
+│               FastAPI API Server (port 8000)             │
+│   POST /jobs · GET /jobs/{id} · WS /ws/jobs/{id}         │
+└──────┬───────────────────────────────────────┬───────────┘
+       │ enqueue task                          │ subscribe
+       ▼                                       ▼
+┌─────────────┐                       ┌─────────────────┐
+│   Celery    │                       │      Redis      │
+│   Worker    │──── publish status ──▶│   pub/sub       │
+└──────┬──────┘                       └────────┬────────┘
+       │                                       │ push to WS
+       ▼                                       ▼
+┌───────────────────┐               ┌─────────────────────┐
+│  Claude AI        │               │  FastAPI WS Handler │
+│  (claude-sonnet)  │               └─────────────────────┘
+│  Vision analysis  │
+│  + Prompt craft   │
+└──────┬────────────┘
+       │ rich text prompt
        ▼
-┌─────────────┐     ┌─────────────┐
-│   AWS S3    │     │   MySQL DB  │
-│ (store img) │     │ (job state) │
-└─────────────┘     └─────────────┘
+┌───────────────────┐     ┌───────────────┐     ┌──────────┐
+│  Stability AI /   │     │   MySQL DB    │     │  AWS S3  │
+│  Replicate API    │     │  (job state)  │     │  (imgs)  │
+└───────────────────┘     └───────────────┘     └──────────┘
 ```
-
-**Key design decisions:**
-
-- **Non-blocking API**: The `POST /jobs` endpoint returns immediately with a `job_id`; heavy processing runs entirely in the background via Celery.
-- **Real-time updates via Redis pub/sub**: The Celery worker publishes status events to Redis. The FastAPI WebSocket handler subscribes to the `jobs_updates` channel and forwards matching events to the connected client.
-- **Pluggable image provider**: The `IMAGE_PROVIDER` environment variable selects between OpenAI, Replicate, or Stability AI without code changes.
-- **Async database access**: `aiomysql` and SQLModel's async engine allow non-blocking database operations inside FastAPI's async event loop.
 
 ---
 
@@ -94,101 +90,72 @@ The system is split into four independent services orchestrated by Docker Compos
 
 ```
 my-new-avatar-ai/
-├── BE/app/
-│   ├── main.py          # FastAPI app: REST endpoints + WebSocket handler
-│   ├── models.py        # SQLModel schema (Job table)
-│   ├── db.py            # Async database engine and session setup
-│   ├── workers.py       # Celery task: orchestrates the full generation pipeline
-│   ├── ai_agent.py      # Agno agent + ImageGenTool (calls AI provider APIs)
-│   ├── storage.py       # AWS S3 upload helper
-│   └── utils.py         # Redis pub/sub helpers and file I/O utilities
-├── docker-compose.yml   # Runs API, Worker, MySQL, Redis as containers
-├── Dockerfile           # Python 3.11 image for API and Worker services
-├── requirements.txt     # Python dependencies
-├── sequence-diagram.plantuml  # UML sequence diagram of the full workflow
-└── .env                 # Environment variables (API keys, DB credentials)
+├── FE/                          # Next.js frontend
+│   ├── src/app/
+│   │   ├── page.tsx             # Main UI: upload, status, result
+│   │   ├── layout.tsx           # Root layout + metadata
+│   │   └── globals.css          # Tailwind base styles
+│   ├── Dockerfile               # Multi-stage Node.js build
+│   ├── package.json
+│   ├── next.config.ts
+│   ├── tailwind.config.ts
+│   └── tsconfig.json
+│
+├── BE/                          # Python backend
+│   ├── app/
+│   │   ├── main.py              # FastAPI app: REST + WebSocket
+│   │   ├── models.py            # SQLModel Job schema
+│   │   ├── db.py                # Async MySQL engine + session
+│   │   ├── workers.py           # Celery task: full generation pipeline
+│   │   ├── ai_agent.py          # Claude Vision + image generation
+│   │   ├── storage.py           # AWS S3 upload helper
+│   │   └── utils.py             # Redis pub/sub + file I/O
+│   ├── Dockerfile               # Python 3.11 image
+│   └── requirements.txt         # Python dependencies
+│
+├── docker-compose.yml           # All services: frontend, api, worker, db, redis
+├── .env                         # Environment variables (API keys, credentials)
+└── README.md
 ```
 
 ---
 
 ## How It Works
 
-### Step-by-step flow
+### Avatar Generation Pipeline
 
 ```
-1. Client sends POST /jobs
-   ├─ Uploads image file + theme + outfit form fields
-   ├─ FastAPI generates a UUID job_id
-   ├─ Saves image to /tmp/{job_id}_{filename}
-   ├─ Creates a Job record in MySQL with status = "queued"
-   ├─ Enqueues generate_avatar_task(temp_path, theme, outfit, job_id) in Celery
-   └─ Returns { "job_id": "...", "status": "queued" }
+1. User submits POST /jobs (image + theme + outfit)
+   ├─ FastAPI saves image to /tmp/{job_id}_{filename}
+   ├─ Creates Job record in MySQL (status = "queued")
+   ├─ Enqueues Celery task
+   └─ Returns { job_id, status: "queued" }
 
-2. Client opens WebSocket /ws/jobs/{job_id}
+2. Browser opens WebSocket /ws/jobs/{job_id}
    └─ FastAPI subscribes to Redis channel "jobs_updates"
-      and listens for messages matching the job_id
 
-3. Celery worker picks up the task
+3. Celery worker executes:
    │
-   ├─ a) Update status → "processing"
-   │     Publishes to Redis: { "job_id": "...", "status": "processing" }
+   ├─ a) Update DB → status = "processing"; publish to Redis
    │
-   ├─ b) Generate avatar image
-   │     ├─ Reads input image bytes from temp file
-   │     ├─ Builds prompt:
-   │     │   "Create a photorealistic portrait using reference image.
-   │     │    Style: {theme}. Clothing: {outfit}. High resolution..."
-   │     ├─ Creates Agno Agent with ImageGenTool
-   │     ├─ Agent calls ImageGenTool._call_provider() which routes to:
-   │     │   ├─ REPLICATE  → POST api.replicate.com/v1/predictions
-   │     │   ├─ STABILITY  → POST api.stability.ai/.../text-to-image
-   │     │   └─ OPENAI     → POST api.openai.com/v1/images/generations
-   │     └─ Returns image bytes
+   ├─ b) Claude AI Vision Analysis
+   │     ├─ Portrait image sent to claude-sonnet-4-6 as base64
+   │     ├─ Claude analyzes: facial features, skin tone, hair, expression
+   │     └─ Returns a rich, detailed text-to-image generation prompt
    │
-   ├─ c) Upload to AWS S3
-   │     ├─ boto3 uploads PNG to S3 bucket
-   │     └─ Returns "https://{bucket}.s3.amazonaws.com/{job_id}_result.png"
+   ├─ c) Image Generation (via IMAGE_PROVIDER)
+   │     ├─ STABILITY → POST stability.ai SDXL endpoint
+   │     └─ REPLICATE → POST replicate.com predictions (polling)
    │
-   └─ d) Save result
-         ├─ Updates Job record: status = "done", result_url = S3 URL
-         └─ Publishes to Redis: { "job_id": "...", "status": "done", "url": "..." }
+   ├─ d) Upload to AWS S3
+   │     └─ Returns https://{bucket}.s3.amazonaws.com/{job_id}_result.png
+   │
+   └─ e) Update DB → status = "done", result_url = S3 URL
+         └─ Publish to Redis → WebSocket → Browser displays avatar
 
-4. FastAPI WebSocket handler receives Redis message
-   └─ Sends to client: { "job_id": "...", "status": "done", "url": "..." }
-
-5. On error at any step
-   ├─ Updates Job: status = "failed", error = exception message
-   └─ Publishes to Redis: { "job_id": "...", "status": "failed", "error": "..." }
-```
-
-### Sequence Diagram
-
-```
-Client        FastAPI       MySQL      Celery Worker   Agno Agent   AI Provider   S3      Redis
-  |               |           |              |               |            |         |        |
-  |--POST /jobs-->|           |              |               |            |         |        |
-  |               |--INSERT-->|              |               |            |         |        |
-  |               |--enqueue task----------->|               |            |         |        |
-  |<--{job_id}----|           |              |               |            |         |        |
-  |               |           |              |               |            |         |        |
-  |--WS connect-->|           |              |               |            |         |        |
-  |               |<-----------subscribe to Redis pub/sub---------------------------->|      |
-  |               |           |              |               |            |         |        |
-  |               |           |      status=processing       |            |         |        |
-  |               |           |              |--publish--------------------------------------------->|
-  |<--{processing}|<---------------------------------------------------------receive--|        |
-  |               |           |              |               |            |         |        |
-  |               |           |              |--generate---->|            |         |        |
-  |               |           |              |               |--API call-->|         |        |
-  |               |           |              |               |<--image bytes---------|        |
-  |               |           |              |<--img bytes---|            |         |        |
-  |               |           |              |                             |--upload->|       |
-  |               |           |              |<-----------------------url--|         |        |
-  |               |           |              |               |            |         |        |
-  |               |           |      status=done, url        |            |         |        |
-  |               |           |<--UPDATE-----|               |            |         |        |
-  |               |           |              |--publish--------------------------------------------->|
-  |<--{done, url}-|<---------------------------------------------------------receive--|        |
+4. On any error:
+   ├─ Update DB → status = "failed", error = message
+   └─ Publish to Redis → WebSocket → Browser shows error
 ```
 
 ---
@@ -203,45 +170,38 @@ Submit an avatar generation job.
 
 | Field | Type | Description |
 |---|---|---|
-| `image` | file | Portrait photo (JPEG, PNG, etc.) |
-| `theme` | string | Style/aesthetic theme (e.g., "cyberpunk", "fantasy") |
-| `outfit` | string | Clothing style (e.g., "suit", "casual") |
+| `file` | file | Portrait photo (JPEG, PNG, WebP) |
+| `theme` | string | Style theme (e.g. "Cyberpunk", "Fantasy", "Anime") |
+| `outfit` | string | Clothing style (e.g. "leather jacket", "business suit") |
 
 **Response** `200 OK`:
-
 ```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued"
-}
+{ "job_id": "550e8400-...", "status": "queued" }
 ```
 
 ---
 
 ### `GET /jobs/{job_id}`
 
-Fetch the current status and result of a job.
+Fetch job status and result URL.
 
 **Response** `200 OK`:
-
 ```json
 {
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "job_id": "550e8400-...",
   "status": "done",
   "url": "https://my-bucket.s3.amazonaws.com/550e8400_result.png",
   "error": null
 }
 ```
 
-Possible `status` values: `queued` · `processing` · `done` · `failed`
+Status values: `queued` · `processing` · `done` · `failed`
 
 ---
 
 ### `WebSocket /ws/jobs/{job_id}`
 
-Open a WebSocket connection to receive real-time status updates for a job. Messages are JSON objects pushed by the server whenever the job status changes.
-
-**Example messages received:**
+Real-time job status updates. Messages pushed by the server:
 
 ```json
 { "job_id": "...", "status": "processing" }
@@ -251,84 +211,121 @@ Open a WebSocket connection to receive real-time status updates for a job. Messa
 
 ---
 
-## Data Model
-
-**`Job` table (MySQL)**:
-
-| Column | Type | Description |
-|---|---|---|
-| `id` | int (PK) | Auto-increment primary key |
-| `job_id` | varchar (unique) | UUID identifying the job |
-| `status` | varchar | `queued` / `processing` / `done` / `failed` |
-| `input_path` | varchar | Temporary file path of the uploaded image |
-| `theme` | varchar | Theme parameter |
-| `outfit` | varchar | Outfit parameter |
-| `result_url` | varchar | S3 URL of the generated image |
-| `error` | varchar | Error message if the job failed |
-| `created_at` | datetime | Job creation timestamp |
-| `updated_at` | datetime | Last update timestamp |
-
----
-
 ## Configuration
 
-All configuration is provided via environment variables (`.env` file):
+All configuration via `.env`:
 
 ```env
-# Database
-DATABASE_URL=mysql+aiomysql://root:password@db:3306/my_new_avatar_ai
+# Claude AI (Anthropic)
+ANTHROPIC_API_KEY=sk-ant-...
 
-# Redis
-REDIS_URL=redis://redis:6379/0
-
-# AI Provider (choose one: OPENAI, REPLICATE, STABILITY)
-IMAGE_PROVIDER=OPENAI
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL_ID=gpt-4o
-REPLICATE_API_TOKEN=r8_...
+# Image Generation Provider: STABILITY | REPLICATE
+IMAGE_PROVIDER=STABILITY
 STABILITY_API_KEY=sk-...
+REPLICATE_API_TOKEN=r8_...
 
 # AWS S3
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=us-east-1
 AWS_BUCKET_NAME=my-avatar-bucket
+
+# Database (MySQL)
+DATABASE_URL=mysql+aiomysql://root:rootpassword@db:3306/avatarai
+MYSQL_ROOT_PASSWORD=rootpassword
+MYSQL_DATABASE=avatarai
+
+# Redis
+REDIS_URL=redis://redis:6379/0
+
+# EC2 Deployment (set to your EC2 public IP or domain)
+# EC2_HOST=your.ec2.public.ip.or.domain
 ```
 
 ---
 
 ## Running the Project
 
-**Prerequisites:** Docker and Docker Compose installed.
+**Prerequisites:** Docker and Docker Compose.
 
 ```bash
-# 1. Clone the repository
+# 1. Clone and configure
 git clone https://github.com/your-org/my-new-avatar-ai.git
 cd my-new-avatar-ai
 
-# 2. Create and configure environment variables
-cp .env.example .env
-# Edit .env with your API keys and credentials
+# 2. Fill in your API keys
+cp .env .env.local   # edit with real keys
+# Required: ANTHROPIC_API_KEY, STABILITY_API_KEY (or REPLICATE_API_TOKEN)
+# Required: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_BUCKET_NAME
 
 # 3. Start all services
 docker compose up --build
 
-# Services started:
-#   api    → http://localhost:8000
-#   worker → Celery background worker
-#   db     → MySQL on port 3306
-#   redis  → Redis on port 6379
+# Services:
+#   frontend → http://localhost:3000
+#   api      → http://localhost:8000
+#   worker   → Celery background worker
+#   db       → MySQL on port 3306
+#   redis    → Redis on port 6379
 ```
 
-**Test the API:**
+**Test the API directly:**
 
 ```bash
-# Submit a job
 curl -X POST http://localhost:8000/jobs \
-  -F "image=@/path/to/portrait.jpg" \
-  -F "theme=cyberpunk" \
+  -F "file=@/path/to/portrait.jpg" \
+  -F "theme=Cyberpunk" \
   -F "outfit=leather jacket"
 
-# Check job status
 curl http://localhost:8000/jobs/{job_id}
+```
+
+---
+
+## AWS EC2 Deployment
+
+```bash
+# On your EC2 instance (Amazon Linux 2 / Ubuntu):
+
+# 1. Install Docker
+sudo yum update -y
+sudo yum install docker -y
+sudo service docker start
+sudo usermod -aG docker ec2-user
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+
+# 2. Clone the repo and configure
+git clone https://github.com/your-org/my-new-avatar-ai.git
+cd my-new-avatar-ai
+
+# Edit .env with real credentials and set EC2_HOST:
+echo "EC2_HOST=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)" >> .env
+
+# 3. Open ports in EC2 Security Group:
+#   - 3000 (frontend)
+#   - 8000 (API)
+
+# 4. Build and run
+docker-compose up --build -d
+
+# 5. View logs
+docker-compose logs -f
+```
+
+**S3 Bucket policy** — make sure your IAM user has:
+- `s3:PutObject` on `arn:aws:s3:::your-bucket-name/*`
+- `s3:GetObject` on `arn:aws:s3:::your-bucket-name/*` (for public read)
+
+For public avatar URLs, configure the bucket policy:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": "*",
+    "Action": "s3:GetObject",
+    "Resource": "arn:aws:s3:::your-bucket-name/*"
+  }]
+}
 ```

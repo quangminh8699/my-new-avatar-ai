@@ -1,54 +1,81 @@
-version: '3.9'
+version: "3.9"
 
 services:
+  frontend:
+    build:
+      context: ./FE
+      dockerfile: Dockerfile
+    container_name: avatar_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://${EC2_HOST:-localhost}:8000
+      NEXT_PUBLIC_WS_URL: ws://${EC2_HOST:-localhost}:8000
+    depends_on:
+      - api
+    restart: unless-stopped
+
   api:
-    build: .
+    build:
+      context: ./BE
+      dockerfile: Dockerfile
     container_name: avatar_api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
     ports:
       - "8000:8000"
     volumes:
-      - .:/app
       - /tmp:/tmp
     env_file:
       - .env
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
 
   worker:
-    build: .
+    build:
+      context: ./BE
+      dockerfile: Dockerfile
     container_name: avatar_worker
-    command: celery -A app.workers.celery worker --loglevel=info
+    command: celery -A app.workers.celery worker --loglevel=info --concurrency=2
     volumes:
-      - .:/app
       - /tmp:/tmp
     env_file:
       - .env
     depends_on:
-      - api
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
 
   db:
     image: mysql:8.0
     container_name: avatar_db
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: avatarai
-      MYSQL_USER: user
-      MYSQL_PASSWORD: password
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-avatarai}
+      MYSQL_USER: ${MYSQL_USER:-avataruser}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-avatarpassword}
     ports:
       - "3306:3306"
     volumes:
       - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   redis:
-    image: redis:6.2
+    image: redis:6.2-alpine
     container_name: avatar_redis
     ports:
       - "6379:6379"
+    restart: unless-stopped
 
 volumes:
   db_data:
